@@ -128,24 +128,6 @@ linters:
         # Controller Runtime
         - pkg: sigs.k8s.io/controller-runtime
           alias: ctrl
-        # CAPI
-        - pkg: sigs.k8s.io/cluster-api/api/core/v1beta1
-          alias: clusterv1beta1
-        - pkg: sigs.k8s.io/cluster-api/api/core/v1beta2
-          alias: clusterv1
-        # CAPI utils
-        - pkg: sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1
-          alias: v1beta1conditions
-        - pkg: sigs.k8s.io/cluster-api/util/conditions
-          alias: ""
-        - pkg: sigs.k8s.io/cluster-api/util/patch
-          alias: ""
-        - pkg: sigs.k8s.io/cluster-api/internal/topology/names
-          alias: topologynames
-        - pkg: sigs.k8s.io/cluster-api/internal/util/client
-          alias: "clientutil"
-        - pkg: sigs.k8s.io/cluster-api/internal/util/controller
-          alias: "capicontrollerutil"
       no-unaliased: true
     nolintlint:
       require-specific: true

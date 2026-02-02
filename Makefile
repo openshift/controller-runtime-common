@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 # If you update this file, please follow
 # https://www.thapaliya.com/en/writings/well-documented-makefiles/
 
@@ -38,12 +37,11 @@ TRACE ?= 0
 #
 # Full directory of where the Makefile resides
 ROOT_DIR := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
-BIN_DIR := bin
-TOOLS_DIR := .
-TOOLS_BIN_DIR := $(abspath $(TOOLS_DIR)/$(BIN_DIR))
+BIN_DIR := $(abspath $(ROOT_DIR)/bin)
+TOOLS_DIR := $(abspath $(ROOT_DIR)/tools)
 GO_INSTALL := ./scripts/go_install.sh
 
-export PATH := $(abspath $(TOOLS_BIN_DIR)):$(PATH)
+export PATH := $(abspath $(BIN_DIR)):$(PATH)
 
 #
 # Ginkgo configuration.
@@ -66,39 +64,29 @@ _SKIP_ARGS := $(foreach arg,$(strip $(GINKGO_SKIP)),-skip="$(arg)")
 endif
 
 #
-# Binaries.
+# Tools.
 #
-# Note: Need to use abspath so we can invoke these from subdirectories
-
-# Helper function to get dependency version from go.mod
-get_go_version = $(shell go list -m $1 | awk '{print $$2}')
-
-SETUP_ENVTEST_VER := release-0.22
-SETUP_ENVTEST_BIN := setup-envtest
-SETUP_ENVTEST := $(abspath $(TOOLS_BIN_DIR)/$(SETUP_ENVTEST_BIN)-$(SETUP_ENVTEST_VER))
-SETUP_ENVTEST_PKG := sigs.k8s.io/controller-runtime/tools/setup-envtest
-
-GOTESTSUM_VER := v1.12.3
-GOTESTSUM_BIN := gotestsum
-GOTESTSUM := $(abspath $(TOOLS_BIN_DIR)/$(GOTESTSUM_BIN)-$(GOTESTSUM_VER))
-GOTESTSUM_PKG := gotest.tools/gotestsum
-
-GO_APIDIFF_VER := v0.8.3
-GO_APIDIFF_BIN := go-apidiff
-GO_APIDIFF := $(abspath $(TOOLS_BIN_DIR)/$(GO_APIDIFF_BIN)-$(GO_APIDIFF_VER))
-GO_APIDIFF_PKG := github.com/joelanford/go-apidiff
 
 SHELLCHECK_VER := v0.10.0
 
+# Most of the tools are defined and managed in tools/go.tool.mod
+GOLANGCI_LINT := go tool -modfile=$(TOOLS_DIR)/go.tool.mod golangci-lint
+GO_APIDIFF := go tool -modfile=$(TOOLS_DIR)/go.tool.mod go-apidiff
+SETUP_ENVTEST := go tool -modfile=$(TOOLS_DIR)/go.tool.mod setup-envtest
+
+# Note: Need to use abspath so we can invoke these from subdirectories
+# Helper function to get dependency version from go.mod
+get_go_version = $(shell go list -m $1 | awk '{print $$2}')
+# We need to load the version of ginkgo from go.mod rather than from go.tool.mod
+# so we keep the same version used in the test codebase in sync with the one used to run the tests.
 GINKGO_BIN := ginkgo
 GINKGO_VER := $(call get_go_version,github.com/onsi/ginkgo/v2)
-GINKGO := $(abspath $(TOOLS_BIN_DIR)/$(GINKGO_BIN)-$(GINKGO_VER))
+GINKGO := $(abspath $(BIN_DIR)/$(GINKGO_BIN)-$(GINKGO_VER))
 GINKGO_PKG := github.com/onsi/ginkgo/v2/ginkgo
 
-GOLANGCI_LINT_VER := v2.8.0
-GOLANGCI_LINT_BIN := golangci-lint
-GOLANGCI_LINT := $(abspath $(TOOLS_BIN_DIR)/$(GOLANGCI_LINT_BIN)-$(GOLANGCI_LINT_VER))
-GOLANGCI_LINT_PKG := github.com/golangci/golangci-lint/v2/cmd/golangci-lint
+#
+# Top Level targets.
+#
 
 all: test
 
@@ -113,29 +101,57 @@ help:  # Display this help
 ##@ lint and verify:
 
 .PHONY: lint
-lint: $(GOLANGCI_LINT)  ## Lint the codebase
+lint:  ## Lint the codebase
 	$(GOLANGCI_LINT) run -v $(GOLANGCI_LINT_EXTRA_ARGS)
-	cd $(TOOLS_DIR); $(GOLANGCI_LINT) run --path-prefix $(TOOLS_DIR) --config $(ROOT_DIR)/.golangci.yml -v $(GOLANGCI_LINT_EXTRA_ARGS)
 
 .PHONY: verify
-verify: verify-go-directive verify-trailing-newline verify-shellcheck ## Run all verify-* targets
+verify: verify-go-directive verify-go-mod-tidy verify-tools-directory verify-trailing-newline verify-shellcheck ## Run all verify-* targets
 
 .PHONY: verify-go-directive
 verify-go-directive: ## Verify go directive in go.mod files
-	TRACE=$(TRACE) ./scripts/verify-go-directive.sh -g $(GO_DIRECTIVE_VERSION)
+	@echo "Verifying go directive in go.mod"
+	@TRACE=$(TRACE) ./scripts/verify-go-directive.sh -g $(GO_DIRECTIVE_VERSION)
+	@echo "Verifying go directive in tools/go.tool.mod"
+	@TRACE=$(TRACE) ./scripts/verify-go-directive.sh -g $(GO_DIRECTIVE_VERSION) -d $(TOOLS_DIR)
+
+.PHONY: verify-go-mod-tidy
+verify-go-mod-tidy: ## Verify go.mod and tools/go.tool.mod (and their .sum files) are tidy
+	@echo "Verifying go.mod is tidy..."
+	@go mod tidy
+	@if ! git diff --quiet go.mod go.sum; then \
+		echo "ERROR: go.mod or go.sum is not tidy. Run 'go mod tidy' to fix."; \
+		git --no-pager diff go.mod go.sum; \
+		exit 1; \
+	fi
+	@echo "Verifying tools/go.tool.mod is tidy..."
+	@cd tools && go mod tidy
+	@if ! git diff --quiet tools/go.tool.mod tools/go.tool.sum; then \
+		echo "ERROR: tools/go.tool.mod or tools/go.tool.sum is not tidy. Run 'cd tools && go mod tidy' to fix."; \
+		git --no-pager diff tools/go.tool.mod tools/go.tool.sum; \
+		exit 1; \
+	fi
+
+.PHONY: verify-tools-directory
+verify-tools-directory: ## Verify tools directory only contains allowed files
+	@echo "Verifying tools directory..."
+	@TRACE=$(TRACE) ./scripts/verify-directory-files.sh -d $(TOOLS_DIR) go.tool.mod go.tool.sum README.md
 
 .PHONY: verify-shellcheck
 verify-shellcheck: ## Verify shell files
-	TRACE=$(TRACE) ./scripts/verify-shellcheck.sh $(SHELLCHECK_VER)
+	@echo "Verifying shell files..."
+	@TRACE=$(TRACE) ./scripts/verify-shellcheck.sh $(SHELLCHECK_VER)
 
 .PHONY: verify-trailing-newline
 verify-trailing-newline: ## Verify all files end with a newline
-	TRACE=$(TRACE) ./scripts/verify-trailing-newline.sh
+	@echo "Verifying all files end with a newline..."
+	@TRACE=$(TRACE) ./scripts/verify-trailing-newline.sh
 
 APIDIFF_OLD_COMMIT ?= $(shell git rev-parse origin/main)
+
 .PHONY: apidiff
-apidiff: $(GO_APIDIFF) ## Check for API differences
-	$(GO_APIDIFF) $(APIDIFF_OLD_COMMIT) --print-compatible
+apidiff:  ## Check for API differences
+	@echo "Checking for API differences..."
+	@$(GO_APIDIFF) $(APIDIFF_OLD_COMMIT) --print-compatible
 
 ## --------------------------------------
 ## Testing
@@ -145,45 +161,19 @@ apidiff: $(GO_APIDIFF) ## Check for API differences
 
 ARTIFACTS ?= ${ROOT_DIR}/_artifacts
 
-KUBEBUILDER_ASSETS ?= $(shell $(SETUP_ENVTEST) use  -p path $(KUBEBUILDER_ENVTEST_KUBERNETES_VERSION) --index https://raw.githubusercontent.com/openshift/api/master/envtest-releases.yaml)
+KUBEBUILDER_ASSETS ?= $(shell $(SETUP_ENVTEST) use -p path $(KUBEBUILDER_ENVTEST_KUBERNETES_VERSION) --index https://raw.githubusercontent.com/openshift/api/master/envtest-releases.yaml)
 
 .PHONY: setup-envtest
-setup-envtest: $(SETUP_ENVTEST) ## Set up envtest (download kubebuilder assets)
-	@echo KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS)
+setup-envtest: ## Set up envtest (download kubebuilder assets)
+	@echo "Setting up envtest (download kubebuilder assets)..."
+	@echo "KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS)"
 
 .PHONY: test
-test: $(SETUP_ENVTEST) ## Run unit and integration tests with race detector
+test: ## Run unit and integration tests with race detector
 	KUBEBUILDER_ASSETS="$(KUBEBUILDER_ASSETS)" go test -race ./... $(TEST_ARGS)
 
-## --------------------------------------
-## Hack / Tools
-## --------------------------------------
-
-##@ hack/tools:
-
-.PHONY: $(GOLANGCI_LINT_BIN)
-$(GOLANGCI_LINT_BIN): $(GOLANGCI_LINT) ## Build a local copy of golangci-lint.
-
-$(GOLANGCI_LINT): # Build golangci-lint from tools folder.
-	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) $(GOLANGCI_LINT_PKG) $(GOLANGCI_LINT_BIN) $(GOLANGCI_LINT_VER)
-
-# ---
-.PHONY: $(GO_APIDIFF_BIN)
-$(GO_APIDIFF_BIN): $(GO_APIDIFF) ## Build a local copy of go-apidiff
-
-$(GO_APIDIFF): # Build go-apidiff from tools folder.
-	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) $(GO_APIDIFF_PKG) $(GO_APIDIFF_BIN) $(GO_APIDIFF_VER)
-
-# ---
 .PHONY: $(GINKGO_BIN)
 $(GINKGO_BIN): $(GINKGO) ## Build a local copy of ginkgo.
 
-$(GINKGO): # Build ginkgo from tools folder.
-	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) $(GINKGO_PKG) $(GINKGO_BIN) $(GINKGO_VER)
-
-# ---
-.PHONY: $(SETUP_ENVTEST_BIN)
-$(SETUP_ENVTEST_BIN): $(SETUP_ENVTEST) ## Build a local copy of setup-envtest.
-
-$(SETUP_ENVTEST): # Build setup-envtest from tools folder.
-	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) $(SETUP_ENVTEST_PKG) $(SETUP_ENVTEST_BIN) $(SETUP_ENVTEST_VER)
+$(GINKGO): # Build ginkgo from bin dir.
+	GOBIN=$(BIN_DIR) $(GO_INSTALL) $(GINKGO_PKG) $(GINKGO_BIN) $(GINKGO_VER)

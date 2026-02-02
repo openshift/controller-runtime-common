@@ -14,16 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# copied from: https://github.com/kubernetes-sigs/cluster-api/blob/main/hack/verify-go-directive.sh
+# modified from: https://github.com/kubernetes-sigs/cluster-api/blob/main/hack/verify-go-directive.sh
 
-# This script verifies that the Go directive in go.mod files does not exceed
-# a specified maximum version. It recursively searches for all go.mod files
+# This script verifies that the Go directive in go.mod and go.tool.mod files does not exceed
+# a specified maximum version. It recursively searches for all go.mod and go.tool.mod files
 # and checks that their Go version is at or below the provided maximum.
 # This is used to avoid that the Go version is inadvertenly bumped by
 # dependencies.
 #
-# Usage: ./verify-go-directive.sh -g <maximum_version>
+# Usage: ./verify-go-directive.sh -g <maximum_version> [-d <directory>]
 # Example: ./verify-go-directive.sh -g 1.21
+# Example: ./verify-go-directive.sh -g 1.21 -d tools
 
 set -o errexit
 set -o nounset
@@ -37,24 +38,28 @@ function usage {
   local script
   script="$(basename "$0")"
   cat >&2 <<EOF
-Usage: ${script} [-g <maximum go directive>]
+Usage: ${script} [-g <maximum go directive>] [-d <directory>]
 This script should be run at the root of a module.
 -g <maximum go directive>
-  Compare the go directive in the local working copy's go.mod
+  Compare the go directive in go.mod and go.tool.mod files
   to the specified maximum version it can be. Versions provided
   here are of the form 1.x.y, without the 'go' prefix.
+-d <directory>
+  Directory to search for go.mod and go.tool.mod files (default: current directory)
 Examples:
   ${script} -g 1.20
   ${script} -g 1.21.6
+  ${script} -g 1.21 -d tools
 EOF
   exit 1
 }
 
 directory=""
 max=""
-while getopts g: opt; do
+while getopts g:d: opt; do
   case "$opt" in
     g) max="$OPTARG";;
+    d) directory="$OPTARG";;
     *) usage;;
   esac
 done
@@ -67,8 +72,8 @@ if [[ -z "${directory}" ]]; then
   directory="."
 fi
 
-# Recursive search for go.mod files
-find "${directory}" -name "go.mod" -type f -print0 | while IFS= read -r -d '' file; do
+# Recursive search for go.mod and go.tool.mod files
+find "${directory}" \( -name "go.mod" -o -name "go.tool.mod" \) -type f -print0 | while IFS= read -r -d '' file; do
   if ! current=$(awk '$1 == "go" {print $2; exit}' "$file"); then
     echo >&2 "FAIL: could not get value of go directive from ${file}"
     exit 1

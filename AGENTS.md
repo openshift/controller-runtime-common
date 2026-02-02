@@ -20,4 +20,3 @@ make verify            # Run all verification checks
 
 - Use Ginkgo/Gomega for tests
 - Follow `.golangci.yaml`
-
