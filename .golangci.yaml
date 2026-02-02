@@ -1,0 +1,247 @@
+version: "2"
+run:
+  timeout: 10m
+  build-tags:
+    - tools
+    - e2e
+  allow-parallel-runners: true
+linters:
+  default: none
+  enable:
+    - asasalint # warns about passing []any to func(...any) without expanding it
+    - asciicheck # non ascii symbols
+    - bidichk # dangerous unicode sequences
+    - bodyclose # unclosed http bodies
+    - containedctx # context.Context nested in a struct
+    - copyloopvar # copying loop variables
+    - dogsled # too many blank identifiers in assignments
+    - dupword # duplicate words
+    - durationcheck # multiplying two durations
+    - errcheck # unchecked errors
+    - errchkjson # invalid types passed to json encoder
+    - forbidigo # allows to block usage of funcs
+    - ginkgolinter # ginkgo and gomega
+    - gocritic # bugs, performance, style (we could add custom ones to this one)
+    - godot # checks that comments end in a period
+    - godox # block FIXMEs
+    - goheader # check for license header
+    - goprintffuncname # printft-like functions should be named with f at the end
+    - gosec # potential security problems
+    - govet # basically 'go vet'
+    - importas # consistent import aliases
+    - ineffassign # ineffectual assignments
+    - intrange # suggest using integer range in for loops
+    - loggercheck # check for even key/value pairs in logger calls
+    - misspell # spelling
+    - nilerr # returning nil after checking err is not nil
+    - noctx # http requests without context.Context
+    - nolintlint # badly formatted nolint directives
+    - nosprintfhostport # using sprintf to construct host:port in a URL
+    - prealloc # suggest preallocating slices
+    - predeclared # shadowing predeclared identifiers
+    - revive # better version of golint
+    - staticcheck # some of staticcheck's rules
+    - thelper # test helpers not starting with t.Helper()
+    - unconvert # unnecessary type conversions
+    - unparam # unused function parameters
+    - unused # unused constants, variables,functions, types
+    - usestdlibvars # using variables/constants from the standard library
+    - usetesting # report function to be replace by testing
+    - whitespace # unnecessary newlines
+  disable:
+    # TODO: It will be dropped when the Go version migration is done.
+    - usetesting
+  settings:
+    forbidigo:
+    ginkgolinter:
+      forbid-focus-container: true
+    gocritic:
+      disabled-checks:
+        - appendAssign
+        - dupImport # https://github.com/go-critic/go-critic/issues/845
+        - evalOrder
+        - ifElseChain
+        - octalLiteral
+        - regexpSimplify
+        - sloppyReassign
+        - truncateCmp
+        - typeDefFirst
+        - unnamedResult
+        - unnecessaryDefer
+        - whyNoLint
+        - wrapperFunc
+        - rangeValCopy
+        - hugeParam
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - performance
+    godot:
+      #   declarations - for top level declaration comments (default);
+      #   toplevel     - for top level comments;
+      #   all          - for all comments.
+      scope: toplevel
+      exclude:
+        - ^ \+.*
+        - ^ ANCHOR.*
+        - '^ (alpha|beta|GA): v.*'
+    godox:
+      keywords:
+        - FIXME # FIXME's should be removed before merging PRs
+    goheader:
+      values:
+        regexp:
+          license-year: (202[2-9]|20[3-9][0-9])
+      template: |-
+        Copyright {{license-year}} Red Hat, Inc.
+
+        Licensed under the Apache License, Version 2.0 (the "License");
+        you may not use this file except in compliance with the License.
+        You may obtain a copy of the License at
+
+            http://www.apache.org/licenses/LICENSE-2.0
+
+        Unless required by applicable law or agreed to in writing, software
+        distributed under the License is distributed on an "AS IS" BASIS,
+        WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+        See the License for the specific language governing permissions and
+        limitations under the License.
+    gosec:
+      excludes:
+      # integer overflow conversion int -> int32
+        - G115
+    importas:
+      alias:
+        # Kubernetes
+        - pkg: k8s.io/api/core/v1
+          alias: corev1
+        - pkg: k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1
+          alias: apiextensionsv1
+        - pkg: k8s.io/apimachinery/pkg/apis/meta/v1
+          alias: metav1
+        - pkg: k8s.io/apimachinery/pkg/api/errors
+          alias: apierrors
+        - pkg: k8s.io/apimachinery/pkg/util/errors
+          alias: kerrors
+        - pkg: k8s.io/component-base/logs/api/v1
+          alias: logsv1
+        # Controller Runtime
+        - pkg: sigs.k8s.io/controller-runtime
+          alias: ctrl
+      no-unaliased: true
+    nolintlint:
+      require-specific: true
+      allow-unused: false
+    revive:
+      rules:
+        # The following rules are recommended https://github.com/mgechev/revive#recommended-configuration
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        #
+        # Rules in addition to the recommended configuration above.
+        #
+        - name: bool-literal-in-expr
+        - name: constant-logical-expr
+  exclusions:
+    generated: strict
+    paths:
+      - zz_generated.*\.go$
+      - vendored_openapi\.go$
+    rules:
+    # Specific exclude rules for deprecated fields that are still part of the codebase. These
+    # should be removed as the referenced deprecated item is removed from the project.
+      - linters:
+          - staticcheck
+        text: 'SA1019: .* is deprecated: This package will be removed in one of the next releases.'
+        # Exclude some packages or code to require comments, for example test code, or fake clients.
+      - linters:
+          - unparam
+        text: always receives
+        # Dot imports for gomega and ginkgo are allowed
+        # within test files and test utils.
+      - linters:
+          - revive
+          - staticcheck
+        path: _test\.go
+        text: should not use dot imports
+        # Disable gosec for test files.
+      - linters:
+          - gosec
+        path: _test\.go
+        # Append should be able to assign to a different var/slice.
+      - linters:
+          - gocritic
+        text: 'appendAssign: append result not assigned to the same slice'
+        # Disable linters for conversion
+      - linters:
+          - staticcheck
+        path: .*(api|types)\/.*\/conversion.*\.go$
+        text: 'SA1019: in.(.+) is deprecated'
+      - linters:
+          - revive
+        # Ignoring stylistic checks for generated code
+        path: .*(api|types|test)\/.*\/conversion.*\.go$
+        # Checking if an error is nil to just after return the error or nil is redundant
+        text: 'if-return: redundant if ...; err != nil check, just return error instead'
+      - linters:
+          - revive
+        # Ignoring stylistic checks for generated code
+        path: .*(api|types|test)\/.*\/conversion.*\.go$
+        # Exported function and methods should have comments. This warns on undocumented exported functions and methods.
+        text: exported (method|function|type|const) (.+) should have comment or be unexported
+      - linters:
+          - revive
+        # Ignoring stylistic checks for generated code
+        path: .*(api|types|test)\/.*\/conversion.*\.go$
+        # This rule warns when initialism, variable or package naming conventions are not followed.
+        text: 'var-naming: don''t use underscores in Go names;'
+        # Ignore non-constant format string in call to condition utils
+      - linters:
+          - goconst
+        path: (.+)_test\.go
+        # It's clearer to see that a field gets accessed or func gets called on the embedded objects
+      - linters:
+          - staticcheck
+        path: (.+)\.go$
+        text: 'QF1008: could remove embedded field'
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  enable:
+    - gci # ensures imports are organized
+    - gofmt # warns about incorrect use of fmt functions
+    - goimports # import formatting
+  settings:
+    gci:
+      sections:
+        - standard # Standard section: captures all standard packages.
+        - default # Default section: contains all imports that could not be matched to another section type.
+      custom-order: true
+  exclusions:
+    generated: strict
+    paths:
+      - zz_generated.*\.go$
+      - vendored_openapi\.go$
