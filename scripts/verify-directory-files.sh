@@ -97,11 +97,14 @@ while IFS= read -r file; do
   filename=$(basename "${file}")
   allowed=false
   for allowed_file in "${ALLOWED_FILES[@]}"; do
-    # Support glob patterns (e.g., *.sh)
-    if [[ "${filename}" == ${allowed_file} ]]; then
-      allowed=true
-      break
-    fi
+    # Support glob patterns (e.g., *.sh) using case statement
+    # shellcheck disable=SC2254 # We intentionally want glob matching here
+    case "${filename}" in
+      ${allowed_file})
+        allowed=true
+        break
+        ;;
+    esac
   done
   if [[ "${allowed}" == "false" ]]; then
     invalid_files+=("${file}")
