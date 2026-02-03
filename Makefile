@@ -43,6 +43,12 @@ GO_INSTALL := ./scripts/go_install.sh
 
 export PATH := $(abspath $(BIN_DIR)):$(PATH)
 
+# Set GOMODCACHE to a stable temporary location if not already set
+# This prevents permission issues in CI environments where HOME might not be set
+# Uses a stable tmp directory name so it persists across invocations
+GOMODCACHE ?= /tmp/.gomodcache-controller-runtime-common
+export GOMODCACHE
+
 #
 # Ginkgo configuration.
 #
