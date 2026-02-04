@@ -1,0 +1,294 @@
+/*
+Copyright 2026 Red Hat, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package tls
+
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	configv1 "github.com/openshift/api/config/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+)
+
+var _ = Describe("SecurityProfileWatcher controller", func() {
+	var (
+		mgrCancel       context.CancelFunc
+		mgrDone         chan struct{}
+		mgr             manager.Manager
+		apiServer       *configv1.APIServer
+		callbackOnce    sync.Once
+		callbackCnt     atomic.Int32
+		oldProfileSpec  configv1.TLSProfileSpec
+		newProfileSpec  configv1.TLSProfileSpec
+		profileChangeMu sync.Mutex
+	)
+
+	BeforeEach(func() {
+		var err error
+
+		// Create the APIServer object.
+		apiServer = &configv1.APIServer{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: APIServerName,
+			},
+			Spec: configv1.APIServerSpec{
+				TLSSecurityProfile: &configv1.TLSSecurityProfile{
+					Type: configv1.TLSProfileIntermediateType,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, apiServer)).To(Succeed())
+
+		// Create a new manager for each test.
+		mgr, err = ctrl.NewManager(cfg, managerOptions)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Reset callback tracking.
+		callbackOnce = sync.Once{}
+		callbackCnt.Store(0)
+		profileChangeMu = sync.Mutex{}
+		oldProfileSpec = configv1.TLSProfileSpec{}
+		newProfileSpec = configv1.TLSProfileSpec{}
+	})
+
+	AfterEach(func() {
+		// Stop the manager if it's running.
+		if mgrCancel != nil {
+			mgrCancel()
+			<-mgrDone
+		}
+
+		// Clean up the APIServer object.
+		Expect(k8sClient.Delete(ctx, apiServer)).To(Succeed())
+	})
+
+	startManager := func(initialProfile configv1.TLSProfileSpec) {
+		var mgrCtx context.Context
+		mgrCtx, mgrCancel = context.WithCancel(ctx)
+		mgrDone = make(chan struct{})
+
+		// Set up the TLS security profile watcher controller.
+		watcher := &SecurityProfileWatcher{
+			Client:                mgr.GetClient(),
+			InitialTLSProfileSpec: initialProfile,
+			OnProfileChange: func(oldTLSProfileSpec, newTLSProfileSpec configv1.TLSProfileSpec) {
+				// Capture the profiles for verification in tests.
+				profileChangeMu.Lock()
+				oldProfileSpec = oldTLSProfileSpec
+				newProfileSpec = newTLSProfileSpec
+				profileChangeMu.Unlock()
+
+				// Use sync.Once to ensure we only count the first call,
+				// similar to how context.CancelFunc is idempotent.
+				callbackOnce.Do(func() {
+					callbackCnt.Add(1)
+				})
+				// Always cancel the context (this is idempotent).
+				mgrCancel()
+			},
+		}
+		Expect(watcher.SetupWithManager(mgr)).To(Succeed())
+
+		// Start the manager in a goroutine.
+		go func() {
+			defer GinkgoRecover()
+			defer close(mgrDone)
+			err := mgr.Start(mgrCtx)
+			Expect(err).NotTo(HaveOccurred())
+		}()
+
+		// Wait for the manager to be ready.
+		Eventually(func() bool {
+			return mgr.GetCache().WaitForCacheSync(mgrCtx)
+		}).Should(BeTrue())
+	}
+
+	Context("when the TLS profile does not change", func() {
+		It("should not invoke the callback", func() {
+			// Start with the intermediate profile (same as what's configured).
+			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+			Expect(err).NotTo(HaveOccurred())
+			startManager(initialProfile)
+
+			// Wait a bit and verify callback was not invoked.
+			Consistently(callbackCnt.Load).Should(Equal(int32(0)), "callback count should be 0 (callback not invoked)")
+		})
+
+		It("should not invoke the callback when switching to custom profile with identical settings", func() {
+			// Start with the intermediate profile.
+			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+			Expect(err).NotTo(HaveOccurred())
+			startManager(initialProfile)
+
+			// Get the intermediate profile spec to replicate it exactly.
+			intermediateSpec := *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
+
+			// Update the APIServer to use a custom profile with identical settings.
+			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileCustomType,
+				Custom: &configv1.CustomTLSProfile{
+					TLSProfileSpec: intermediateSpec,
+				},
+			}
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Verify callback was NOT invoked since settings are identical.
+			Consistently(callbackCnt.Load).Should(Equal(int32(0)), "callback count should be 0 (callback not invoked for identical settings)")
+		})
+
+		It("should not invoke the callback when switching from custom profile to predefined profile with identical settings", func() {
+			// Get the intermediate profile spec to replicate it exactly.
+			intermediateSpec := *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
+
+			// Update the APIServer to use a custom profile with identical settings to intermediate.
+			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileCustomType,
+				Custom: &configv1.CustomTLSProfile{
+					TLSProfileSpec: intermediateSpec,
+				},
+			}
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Start with the custom profile.
+			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+			Expect(err).NotTo(HaveOccurred())
+			startManager(initialProfile)
+
+			// Switch to the intermediate profile (which has identical settings).
+			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileIntermediateType,
+			}
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Verify callback was NOT invoked since settings are identical.
+			Consistently(callbackCnt.Load).Should(Equal(int32(0)), "callback count should be 0 (callback not invoked for identical settings)")
+		})
+
+	})
+
+	Context("when the TLS profile changes", func() {
+		It("should invoke the callback when MinTLSVersion changes", func() {
+			// Start with the intermediate profile.
+			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+			Expect(err).NotTo(HaveOccurred())
+			startManager(initialProfile)
+
+			// Update the APIServer to use the Modern profile (which has TLS 1.3).
+			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileModernType,
+			}
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Verify callback was invoked.
+			Eventually(callbackCnt.Load).Should(Equal(int32(1)), "callback count should be 1 (callback invoked)")
+
+			// Verify the callback received the correct profiles.
+			profileChangeMu.Lock()
+			defer profileChangeMu.Unlock()
+			Expect(oldProfileSpec).To(Equal(initialProfile), "callback should receive the initial profile as old")
+			modernProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(newProfileSpec).To(Equal(modernProfile), "callback should receive the current profile as new")
+		})
+
+		It("should invoke the callback when switching to custom profile with different TLS settings", func() {
+			// Start with the intermediate profile.
+			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+			Expect(err).NotTo(HaveOccurred())
+			startManager(initialProfile)
+
+			// Define the custom profile we'll switch to.
+			customSpec := configv1.TLSProfileSpec{
+				Ciphers:       []string{"TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384"},
+				MinTLSVersion: configv1.VersionTLS13,
+			}
+
+			// Update the APIServer to use a custom profile.
+			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileCustomType,
+				Custom: &configv1.CustomTLSProfile{
+					TLSProfileSpec: customSpec,
+				},
+			}
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Verify callback was invoked.
+			Eventually(callbackCnt.Load).Should(Equal(int32(1)), "callback count should be 1 (callback invoked)")
+
+			// Verify the callback received the correct profiles.
+			profileChangeMu.Lock()
+			defer profileChangeMu.Unlock()
+			Expect(oldProfileSpec).To(Equal(initialProfile), "callback should receive the initial profile as old")
+			Expect(newProfileSpec).To(Equal(customSpec), "callback should receive the custom profile as new")
+		})
+
+		It("should invoke the callback when switching from custom to predefined profile with different TLS settings", func() {
+			// Update the APIServer to use a custom profile first.
+			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileCustomType,
+				Custom: &configv1.CustomTLSProfile{
+					TLSProfileSpec: configv1.TLSProfileSpec{
+						Ciphers:       []string{"TLS_AES_128_GCM_SHA256"},
+						MinTLSVersion: configv1.VersionTLS13,
+					},
+				},
+			}
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Start with the custom profile.
+			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+			Expect(err).NotTo(HaveOccurred())
+			startManager(initialProfile)
+
+			// Switch back to the intermediate profile.
+			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileIntermediateType,
+			}
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Verify callback was invoked.
+			Eventually(callbackCnt.Load).Should(Equal(int32(1)), "callback count should be 1 (callback invoked)")
+		})
+	})
+
+	Context("when the profile is nil initially", func() {
+		It("should use the default profile and invoke the callback when changes are detected", func() {
+			// Update APIServer to have nil profile.
+			apiServer.Spec.TLSSecurityProfile = nil
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Start with the default (nil -> intermediate) profile.
+			initialProfile, err := GetTLSProfileSpec(nil)
+			Expect(err).NotTo(HaveOccurred())
+			startManager(initialProfile)
+
+			// Update the APIServer to use the Modern profile.
+			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileModernType,
+			}
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Verify callback was invoked.
+			Eventually(callbackCnt.Load).Should(Equal(int32(1)), "callback count should be 1 (callback invoked)")
+		})
+	})
+})
