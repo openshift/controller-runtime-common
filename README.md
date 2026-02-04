@@ -5,5 +5,6 @@ Anything introduced here must have concrete use-cases in at least two separate o
 
 This repo MUST:
 - avoid circular dependencies above all.
+
 This repo SHOULD:
 - have as few external dependencies as possible aside, especially avoid ones that migth end up conflicting with controller-runtime dependencies.
