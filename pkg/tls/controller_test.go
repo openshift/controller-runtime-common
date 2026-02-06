@@ -19,7 +19,6 @@ package tls
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,17 +28,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
+// atomicSlice provides thread-safe slice operations.
+type atomicSlice[T any] struct {
+	mu    sync.RWMutex
+	items []T
+}
+
+func (s *atomicSlice[T]) Append(item T) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items = append(s.items, item)
+}
+
+func (s *atomicSlice[T]) Index(i int) T {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.items[i]
+}
+
+func (s *atomicSlice[T]) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.items)
+}
+
 var _ = Describe("SecurityProfileWatcher controller", func() {
+	type profileChange struct {
+		old configv1.TLSProfileSpec
+		new configv1.TLSProfileSpec
+	}
+
 	var (
-		mgrCancel       context.CancelFunc
-		mgrDone         chan struct{}
-		mgr             manager.Manager
-		apiServer       *configv1.APIServer
-		callbackOnce    sync.Once
-		callbackCnt     atomic.Int32
-		oldProfileSpec  configv1.TLSProfileSpec
-		newProfileSpec  configv1.TLSProfileSpec
-		profileChangeMu sync.Mutex
+		mgrCancel      context.CancelFunc
+		mgrDone        chan struct{}
+		mgr            manager.Manager
+		apiServer      *configv1.APIServer
+		profileChanges *atomicSlice[profileChange]
 	)
 
 	BeforeEach(func() {
@@ -63,11 +87,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// Reset callback tracking.
-		callbackOnce = sync.Once{}
-		callbackCnt.Store(0)
-		profileChangeMu = sync.Mutex{}
-		oldProfileSpec = configv1.TLSProfileSpec{}
-		newProfileSpec = configv1.TLSProfileSpec{}
+		profileChanges = &atomicSlice[profileChange]{}
 	})
 
 	AfterEach(func() {
@@ -90,20 +110,8 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 		watcher := &SecurityProfileWatcher{
 			Client:                mgr.GetClient(),
 			InitialTLSProfileSpec: initialProfile,
-			OnProfileChange: func(oldTLSProfileSpec, newTLSProfileSpec configv1.TLSProfileSpec) {
-				// Capture the profiles for verification in tests.
-				profileChangeMu.Lock()
-				oldProfileSpec = oldTLSProfileSpec
-				newProfileSpec = newTLSProfileSpec
-				profileChangeMu.Unlock()
-
-				// Use sync.Once to ensure we only count the first call,
-				// similar to how context.CancelFunc is idempotent.
-				callbackOnce.Do(func() {
-					callbackCnt.Add(1)
-				})
-				// Always cancel the context (this is idempotent).
-				mgrCancel()
+			OnProfileChange: func(_ context.Context, oldSpec, newSpec configv1.TLSProfileSpec) {
+				profileChanges.Append(profileChange{old: oldSpec, new: newSpec})
 			},
 		}
 		Expect(watcher.SetupWithManager(mgr)).To(Succeed())
@@ -130,7 +138,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			startManager(initialProfile)
 
 			// Wait a bit and verify callback was not invoked.
-			Consistently(callbackCnt.Load).Should(Equal(int32(0)), "callback count should be 0 (callback not invoked)")
+			Consistently(profileChanges.Len).Should(Equal(0), "callback should not be invoked")
 		})
 
 		It("should not invoke the callback when switching to custom profile with identical settings", func() {
@@ -152,7 +160,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
 
 			// Verify callback was NOT invoked since settings are identical.
-			Consistently(callbackCnt.Load).Should(Equal(int32(0)), "callback count should be 0 (callback not invoked for identical settings)")
+			Consistently(profileChanges.Len).Should(Equal(0), "callback should not be invoked for identical settings")
 		})
 
 		It("should not invoke the callback when switching from custom profile to predefined profile with identical settings", func() {
@@ -180,9 +188,8 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
 
 			// Verify callback was NOT invoked since settings are identical.
-			Consistently(callbackCnt.Load).Should(Equal(int32(0)), "callback count should be 0 (callback not invoked for identical settings)")
+			Consistently(profileChanges.Len).Should(Equal(0), "callback should not be invoked for identical settings")
 		})
-
 	})
 
 	Context("when the TLS profile changes", func() {
@@ -199,15 +206,14 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
 
 			// Verify callback was invoked.
-			Eventually(callbackCnt.Load).Should(Equal(int32(1)), "callback count should be 1 (callback invoked)")
+			Eventually(profileChanges.Len).Should(Equal(1), "callback should be invoked once")
 
 			// Verify the callback received the correct profiles.
-			profileChangeMu.Lock()
-			defer profileChangeMu.Unlock()
-			Expect(oldProfileSpec).To(Equal(initialProfile), "callback should receive the initial profile as old")
+			change := profileChanges.Index(0)
+			Expect(change.old).To(Equal(initialProfile), "callback should receive the initial profile as old")
 			modernProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(newProfileSpec).To(Equal(modernProfile), "callback should receive the current profile as new")
+			Expect(change.new).To(Equal(modernProfile), "callback should receive the current profile as new")
 		})
 
 		It("should invoke the callback when switching to custom profile with different TLS settings", func() {
@@ -232,13 +238,12 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
 
 			// Verify callback was invoked.
-			Eventually(callbackCnt.Load).Should(Equal(int32(1)), "callback count should be 1 (callback invoked)")
+			Eventually(profileChanges.Len).Should(Equal(1), "callback should be invoked once")
 
 			// Verify the callback received the correct profiles.
-			profileChangeMu.Lock()
-			defer profileChangeMu.Unlock()
-			Expect(oldProfileSpec).To(Equal(initialProfile), "callback should receive the initial profile as old")
-			Expect(newProfileSpec).To(Equal(customSpec), "callback should receive the custom profile as new")
+			change := profileChanges.Index(0)
+			Expect(change.old).To(Equal(initialProfile), "callback should receive the initial profile as old")
+			Expect(change.new).To(Equal(customSpec), "callback should receive the custom profile as new")
 		})
 
 		It("should invoke the callback when switching from custom to predefined profile with different TLS settings", func() {
@@ -266,7 +271,48 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
 
 			// Verify callback was invoked.
-			Eventually(callbackCnt.Load).Should(Equal(int32(1)), "callback count should be 1 (callback invoked)")
+			Eventually(profileChanges.Len).Should(Equal(1), "callback should be invoked once")
+		})
+
+		It("should invoke the callback twice when profile changes from A to B and back to A", func() {
+			// Start with the intermediate profile (profile A).
+			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+			Expect(err).NotTo(HaveOccurred())
+			startManager(initialProfile)
+
+			// Change from A (Intermediate) to B (Modern).
+			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileModernType,
+			}
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Wait for the first callback.
+			Eventually(profileChanges.Len).Should(Equal(1), "callback should be invoked once after A -> B")
+
+			// Change from B (Modern) back to A (Intermediate).
+			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileIntermediateType,
+			}
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Wait for the second callback.
+			Eventually(profileChanges.Len).Should(Equal(2), "callback should be invoked twice after A -> B -> A")
+
+			// Verify the captured changes are correct.
+			intermediateProfile, err := GetTLSProfileSpec(&configv1.TLSSecurityProfile{Type: configv1.TLSProfileIntermediateType})
+			Expect(err).NotTo(HaveOccurred())
+			modernProfile, err := GetTLSProfileSpec(&configv1.TLSSecurityProfile{Type: configv1.TLSProfileModernType})
+			Expect(err).NotTo(HaveOccurred())
+
+			// First change: Intermediate -> Modern.
+			firstChange := profileChanges.Index(0)
+			Expect(firstChange.old).To(Equal(intermediateProfile), "first change should have Intermediate as old")
+			Expect(firstChange.new).To(Equal(modernProfile), "first change should have Modern as new")
+
+			// Second change: Modern -> Intermediate.
+			secondChange := profileChanges.Index(1)
+			Expect(secondChange.old).To(Equal(modernProfile), "second change should have Modern as old")
+			Expect(secondChange.new).To(Equal(intermediateProfile), "second change should have Intermediate as new")
 		})
 	})
 
@@ -288,7 +334,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
 
 			// Verify callback was invoked.
-			Eventually(callbackCnt.Load).Should(Equal(int32(1)), "callback count should be 1 (callback invoked)")
+			Eventually(profileChanges.Len).Should(Equal(1), "callback should be invoked once")
 		})
 	})
 })

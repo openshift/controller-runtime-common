@@ -42,7 +42,7 @@ type SecurityProfileWatcher struct {
 	InitialTLSProfileSpec configv1.TLSProfileSpec
 
 	// OnProfileChange is a function that will be called when the TLS profile changes.
-	// It receives the old (initial) and new (current) TLS profile specs.
+	// It receives the reconcile context, old and new TLS profile specs.
 	// This allows the caller to make decisions based on the actual profile changes.
 	//
 	// The most common use case for this callback is
@@ -56,7 +56,7 @@ type SecurityProfileWatcher struct {
 	//  defer cancel()
 	//
 	//  watcher := &SecurityProfileWatcher{
-	// 	  OnProfileChange: func(old, new configv1.TLSProfileSpec) {
+	// 	  OnProfileChange: func(ctx context.Context, old, new configv1.TLSProfileSpec) {
 	//      logger.Infof("TLS profile has changed, initiating a shutdown to reload it. %q: %+v, %q: %+v",
 	//        "old profile", old,
 	//        "new profile", new,
@@ -65,7 +65,7 @@ type SecurityProfileWatcher struct {
 	//      cancel()
 	//    },
 	//  }
-	OnProfileChange func(oldTLSProfileSpec, newTLSProfileSpec configv1.TLSProfileSpec)
+	OnProfileChange func(ctx context.Context, oldTLSProfileSpec, newTLSProfileSpec configv1.TLSProfileSpec)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -132,8 +132,11 @@ func (r *SecurityProfileWatcher) Reconcile(ctx context.Context, req ctrl.Request
 	if tlsProfileChanged := !reflect.DeepEqual(r.InitialTLSProfileSpec, currentTLSProfileSpec); tlsProfileChanged {
 		// TLS profile has changed, invoke the callback if it is set.
 		if r.OnProfileChange != nil {
-			r.OnProfileChange(r.InitialTLSProfileSpec, currentTLSProfileSpec)
+			r.OnProfileChange(ctx, r.InitialTLSProfileSpec, currentTLSProfileSpec)
 		}
+
+		// Persist the new profile for future change detection.
+		r.InitialTLSProfileSpec = currentTLSProfileSpec
 	}
 
 	// No need to requeue, as the callback will handle further actions.
