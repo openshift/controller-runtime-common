@@ -6,8 +6,8 @@ require (
 	github.com/go-logr/logr v1.4.3
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
-	github.com/openshift/api v0.0.0-20260130140113-71e91db96ffc
-	github.com/openshift/library-go v0.0.0-20260204111611-b7d4fa0e292a
+	github.com/openshift/api v0.0.0-20260213155647-8fe9fe363807
+	github.com/openshift/library-go v0.0.0-20260213153706-03f1709971c5
 	k8s.io/apimachinery v0.34.3
 	k8s.io/client-go v0.34.3
 	k8s.io/utils v0.0.0-20260108192941-914a6e750570
