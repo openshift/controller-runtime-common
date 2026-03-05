@@ -58,12 +58,18 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 		new configv1.TLSProfileSpec
 	}
 
+	type adherencePolicyChange struct {
+		old configv1.TLSAdherencePolicy
+		new configv1.TLSAdherencePolicy
+	}
+
 	var (
-		mgrCancel      context.CancelFunc
-		mgrDone        chan struct{}
-		mgr            manager.Manager
-		apiServer      *configv1.APIServer
-		profileChanges *atomicSlice[profileChange]
+		mgrCancel              context.CancelFunc
+		mgrDone                chan struct{}
+		mgr                    manager.Manager
+		apiServer              *configv1.APIServer
+		profileChanges         *atomicSlice[profileChange]
+		adherencePolicyChanges *atomicSlice[adherencePolicyChange]
 	)
 
 	BeforeEach(func() {
@@ -88,6 +94,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 
 		// Reset callback tracking.
 		profileChanges = &atomicSlice[profileChange]{}
+		adherencePolicyChanges = &atomicSlice[adherencePolicyChange]{}
 	})
 
 	AfterEach(func() {
@@ -101,17 +108,21 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 		Expect(k8sClient.Delete(ctx, apiServer)).To(Succeed())
 	})
 
-	startManager := func(initialProfile configv1.TLSProfileSpec) {
+	startManager := func(initialProfile configv1.TLSProfileSpec, initialAdherencePolicy configv1.TLSAdherencePolicy) {
 		var mgrCtx context.Context
 		mgrCtx, mgrCancel = context.WithCancel(ctx)
 		mgrDone = make(chan struct{})
 
 		// Set up the TLS security profile watcher controller.
 		watcher := &SecurityProfileWatcher{
-			Client:                mgr.GetClient(),
-			InitialTLSProfileSpec: initialProfile,
+			Client:                    mgr.GetClient(),
+			InitialTLSProfileSpec:     initialProfile,
+			InitialTLSAdherencePolicy: initialAdherencePolicy,
 			OnProfileChange: func(_ context.Context, oldSpec, newSpec configv1.TLSProfileSpec) {
 				profileChanges.Append(profileChange{old: oldSpec, new: newSpec})
+			},
+			OnAdherencePolicyChange: func(_ context.Context, oldPolicy, newPolicy configv1.TLSAdherencePolicy) {
+				adherencePolicyChanges.Append(adherencePolicyChange{old: oldPolicy, new: newPolicy})
 			},
 		}
 		Expect(watcher.SetupWithManager(mgr)).To(Succeed())
@@ -135,7 +146,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			// Start with the intermediate profile (same as what's configured).
 			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
 			Expect(err).NotTo(HaveOccurred())
-			startManager(initialProfile)
+			startManager(initialProfile, apiServer.Spec.TLSAdherence)
 
 			// Wait a bit and verify callback was not invoked.
 			Consistently(profileChanges.Len).Should(Equal(0), "callback should not be invoked")
@@ -145,7 +156,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			// Start with the intermediate profile.
 			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
 			Expect(err).NotTo(HaveOccurred())
-			startManager(initialProfile)
+			startManager(initialProfile, apiServer.Spec.TLSAdherence)
 
 			// Get the intermediate profile spec to replicate it exactly.
 			intermediateSpec := *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
@@ -179,7 +190,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			// Start with the custom profile.
 			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
 			Expect(err).NotTo(HaveOccurred())
-			startManager(initialProfile)
+			startManager(initialProfile, apiServer.Spec.TLSAdherence)
 
 			// Switch to the intermediate profile (which has identical settings).
 			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
@@ -197,7 +208,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			// Start with the intermediate profile.
 			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
 			Expect(err).NotTo(HaveOccurred())
-			startManager(initialProfile)
+			startManager(initialProfile, apiServer.Spec.TLSAdherence)
 
 			// Update the APIServer to use the Modern profile (which has TLS 1.3).
 			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
@@ -220,7 +231,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			// Start with the intermediate profile.
 			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
 			Expect(err).NotTo(HaveOccurred())
-			startManager(initialProfile)
+			startManager(initialProfile, apiServer.Spec.TLSAdherence)
 
 			// Define the custom profile we'll switch to.
 			customSpec := configv1.TLSProfileSpec{
@@ -262,7 +273,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			// Start with the custom profile.
 			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
 			Expect(err).NotTo(HaveOccurred())
-			startManager(initialProfile)
+			startManager(initialProfile, apiServer.Spec.TLSAdherence)
 
 			// Switch back to the intermediate profile.
 			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
@@ -278,7 +289,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			// Start with the intermediate profile (profile A).
 			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
 			Expect(err).NotTo(HaveOccurred())
-			startManager(initialProfile)
+			startManager(initialProfile, apiServer.Spec.TLSAdherence)
 
 			// Change from A (Intermediate) to B (Modern).
 			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
@@ -325,7 +336,7 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 			// Start with the default (nil -> intermediate) profile.
 			initialProfile, err := GetTLSProfileSpec(nil)
 			Expect(err).NotTo(HaveOccurred())
-			startManager(initialProfile)
+			startManager(initialProfile, apiServer.Spec.TLSAdherence)
 
 			// Update the APIServer to use the Modern profile.
 			apiServer.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
@@ -335,6 +346,27 @@ var _ = Describe("SecurityProfileWatcher controller", func() {
 
 			// Verify callback was invoked.
 			Eventually(profileChanges.Len).Should(Equal(1), "callback should be invoked once")
+		})
+	})
+
+	Context("when the TLS adherence policy changes", func() {
+		It("should invoke the callback when policy changes", func() {
+			// Start with the intermediate profile.
+			initialProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+			Expect(err).NotTo(HaveOccurred())
+			startManager(initialProfile, apiServer.Spec.TLSAdherence)
+
+			// Update the APIServer to use a different adherence policy.
+			apiServer.Spec.TLSAdherence = configv1.TLSAdherencePolicyStrictAllComponents
+			Expect(k8sClient.Update(ctx, apiServer)).To(Succeed())
+
+			// Verify callback was invoked.
+			Eventually(adherencePolicyChanges.Len).Should(Equal(1), "callback should be invoked once")
+
+			// Verify the callback received the correct policies.
+			change := adherencePolicyChanges.Index(0)
+			Expect(change.old).To(Equal(configv1.TLSAdherencePolicyNoOpinion), "callback should receive the initial policy as old")
+			Expect(change.new).To(Equal(configv1.TLSAdherencePolicyStrictAllComponents), "callback should receive the current policy as new")
 		})
 	})
 })
