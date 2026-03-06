@@ -18,7 +18,7 @@
 #
 # Go.
 #
-GO_DIRECTIVE_VERSION ?= 1.24.0
+GO_DIRECTIVE_VERSION ?= 1.25.0
 
 # Active module mode, as we use go modules to manage dependencies
 export GO111MODULE=on
