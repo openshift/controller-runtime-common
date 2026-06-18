@@ -205,11 +205,11 @@ var _ = Describe("SetNextProtos", func() {
 		Expect(c.NextProtos).To(Equal([]string{"http/1.1"}))
 	})
 
-	It("should handle no protocols", func() {
+	It("should handle no protocols by preserving nil semantics", func() {
 		fn := SetNextProtos()
 		c := &tls.Config{}
 		fn(c)
-		Expect(c.NextProtos).To(BeEmpty())
+		Expect(c.NextProtos).To(BeNil())
 	})
 
 	It("should not be affected by modification of the original slice", func() {

@@ -46,9 +46,10 @@ var (
 	// with HTTP/1.1 fallback.
 	HTTP2NextProtos = []string{"h2", "http/1.1"} //nolint:gochecknoglobals
 
-	// HTTP1NextProtos are the ALPN protocols advertised when HTTP/2 is disabled.
-	// Use this as a mitigation for HTTP/2 Rapid Reset vulnerabilities
-	// (CVE-2023-44487, CVE-2023-39325).
+	// HTTP1NextProtos are the ALPN protocols advertised when HTTP/2 is disabled,
+	// restricting negotiation to HTTP/1.1 only. This provides defense-in-depth
+	// against HTTP/2 Rapid Reset (CVE-2023-44487, CVE-2023-39325) alongside
+	// the primary fixes in Go 1.21.3+ and golang.org/x/net v0.17.0+.
 	HTTP1NextProtos = []string{"http/1.1"} //nolint:gochecknoglobals
 )
 
@@ -150,8 +151,11 @@ func NewTLSConfigFromProfile(profile configv1.TLSProfileSpec) (tlsConfig func(*t
 //	    openshifttls.SetNextProtos("h2", "http/1.1"),
 //	}
 func SetNextProtos(protos ...string) func(*tls.Config) {
-	p := make([]string, len(protos))
-	copy(p, protos)
+	var p []string
+	if len(protos) > 0 {
+		p = make([]string, len(protos))
+		copy(p, protos)
+	}
 	return func(c *tls.Config) {
 		c.NextProtos = p
 	}
