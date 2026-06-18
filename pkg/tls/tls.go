@@ -41,6 +41,15 @@ var (
 	DefaultTLSCiphers = configv1.TLSProfiles[configv1.TLSProfileIntermediateType].Ciphers //nolint:gochecknoglobals
 	// DefaultMinTLSVersion is the default minimum TLS version for API servers.
 	DefaultMinTLSVersion = configv1.TLSProfiles[configv1.TLSProfileIntermediateType].MinTLSVersion //nolint:gochecknoglobals
+
+	// HTTP2NextProtos are the ALPN protocols advertised when HTTP/2 is enabled,
+	// with HTTP/1.1 fallback.
+	HTTP2NextProtos = []string{"h2", "http/1.1"} //nolint:gochecknoglobals
+
+	// HTTP1NextProtos are the ALPN protocols advertised when HTTP/2 is disabled.
+	// Use this as a mitigation for HTTP/2 Rapid Reset vulnerabilities
+	// (CVE-2023-44487, CVE-2023-39325).
+	HTTP1NextProtos = []string{"http/1.1"} //nolint:gochecknoglobals
 )
 
 // FetchAPIServerTLSProfile fetches the TLS profile spec configured in APIServer.
@@ -129,6 +138,43 @@ func NewTLSConfigFromProfile(profile configv1.TLSProfileSpec) (tlsConfig func(*t
 			tlsConf.CipherSuites = cipherSuites
 		}
 	}, unsupportedCiphers
+}
+
+// SetNextProtos returns a TLS configuration function that sets the ALPN
+// protocol negotiation list on a tls.Config.
+// The returned function is intended to be used with controller-runtime's TLSOpts.
+//
+// Example:
+//
+//	tlsOpts := []func(*tls.Config){
+//	    openshifttls.SetNextProtos("h2", "http/1.1"),
+//	}
+func SetNextProtos(protos ...string) func(*tls.Config) {
+	p := make([]string, len(protos))
+	copy(p, protos)
+	return func(c *tls.Config) {
+		c.NextProtos = p
+	}
+}
+
+// WithHTTP2 returns a TLS configuration function that configures ALPN
+// protocol negotiation based on whether HTTP/2 should be enabled.
+//
+// When enabled is true, both "h2" and "http/1.1" are advertised.
+// When enabled is false, only "http/1.1" is advertised as a mitigation
+// for HTTP/2 Rapid Reset vulnerabilities (CVE-2023-44487, CVE-2023-39325).
+//
+// The returned function is intended to be used with controller-runtime's TLSOpts.
+//
+// Example:
+//
+//	tlsConfig, _ := openshifttls.NewTLSConfigFromProfile(profile)
+//	tlsOpts := []func(*tls.Config){tlsConfig, openshifttls.WithHTTP2(false)}
+func WithHTTP2(enabled bool) func(*tls.Config) {
+	if enabled {
+		return SetNextProtos(HTTP2NextProtos...)
+	}
+	return SetNextProtos(HTTP1NextProtos...)
 }
 
 // cipherCode returns the TLS cipher code for an OpenSSL or IANA cipher name.

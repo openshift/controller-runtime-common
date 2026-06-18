@@ -190,6 +190,88 @@ var _ = Describe("cipherCodes", func() {
 	})
 })
 
+var _ = Describe("SetNextProtos", func() {
+	It("should set NextProtos on tls.Config", func() {
+		fn := SetNextProtos("h2", "http/1.1")
+		c := &tls.Config{}
+		fn(c)
+		Expect(c.NextProtos).To(Equal([]string{"h2", "http/1.1"}))
+	})
+
+	It("should handle a single protocol", func() {
+		fn := SetNextProtos("http/1.1")
+		c := &tls.Config{}
+		fn(c)
+		Expect(c.NextProtos).To(Equal([]string{"http/1.1"}))
+	})
+
+	It("should handle no protocols", func() {
+		fn := SetNextProtos()
+		c := &tls.Config{}
+		fn(c)
+		Expect(c.NextProtos).To(BeEmpty())
+	})
+
+	It("should not be affected by modification of the original slice", func() {
+		protos := []string{"h2", "http/1.1"}
+		fn := SetNextProtos(protos...)
+		protos[0] = "modified"
+		c := &tls.Config{}
+		fn(c)
+		Expect(c.NextProtos).To(Equal([]string{"h2", "http/1.1"}))
+	})
+
+	It("should override any existing NextProtos", func() {
+		fn := SetNextProtos("h2", "http/1.1")
+		c := &tls.Config{NextProtos: []string{"old-proto"}}
+		fn(c)
+		Expect(c.NextProtos).To(Equal([]string{"h2", "http/1.1"}))
+	})
+})
+
+var _ = Describe("WithHTTP2", func() {
+	Context("when HTTP/2 is enabled", func() {
+		It("should set NextProtos to h2 and http/1.1", func() {
+			fn := WithHTTP2(true)
+			c := &tls.Config{}
+			fn(c)
+			Expect(c.NextProtos).To(Equal([]string{"h2", "http/1.1"}))
+		})
+	})
+
+	Context("when HTTP/2 is disabled", func() {
+		It("should set NextProtos to http/1.1 only", func() {
+			fn := WithHTTP2(false)
+			c := &tls.Config{}
+			fn(c)
+			Expect(c.NextProtos).To(Equal([]string{"http/1.1"}))
+		})
+	})
+
+	It("should compose with NewTLSConfigFromProfile", func() {
+		profile := *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
+		tlsConfigFn, _ := NewTLSConfigFromProfile(profile)
+
+		c := &tls.Config{}
+		tlsConfigFn(c)
+		WithHTTP2(false)(c)
+
+		Expect(c.MinVersion).To(Equal(uint16(tls.VersionTLS12)))
+		Expect(c.CipherSuites).NotTo(BeEmpty())
+		Expect(c.NextProtos).To(Equal([]string{"http/1.1"}))
+	})
+})
+
+var _ = Describe("ALPN protocol variables", func() {
+	It("HTTP2NextProtos should contain h2 and http/1.1", func() {
+		Expect(HTTP2NextProtos).To(Equal([]string{"h2", "http/1.1"}))
+	})
+
+	It("HTTP1NextProtos should contain only http/1.1", func() {
+		Expect(HTTP1NextProtos).To(Equal([]string{"http/1.1"}))
+	})
+})
+
 var _ = Describe("NewTLSConfigFromProfile", func() {
 	Context("when MinTLSVersion is TLS 1.2", func() {
 		It("should set MinVersion and CipherSuites", func() {
