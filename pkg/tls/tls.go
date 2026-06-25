@@ -142,43 +142,31 @@ func NewTLSConfigFromProfile(profile configv1.TLSProfileSpec) (tlsConfig func(*t
 }
 
 // SetNextProtos returns a TLS configuration function that sets the ALPN
-// protocol negotiation list on a tls.Config.
+// protocol negotiation list on a tls.Config. Empty strings are silently
+// ignored, which allows conditional protocol inclusion.
 // The returned function is intended to be used with controller-runtime's TLSOpts.
 //
 // Example:
 //
-//	tlsOpts := []func(*tls.Config){
-//	    openshifttls.SetNextProtos("h2", "http/1.1"),
-//	}
+//	// Disable HTTP/2:
+//	openshifttls.SetNextProtos("http/1.1")
+//
+//	// Enable HTTP/2 with fallback:
+//	openshifttls.SetNextProtos("h2", "http/1.1")
+//
+//	// Using the well-known protocol lists:
+//	openshifttls.SetNextProtos(openshifttls.HTTP1NextProtos...)
+//	openshifttls.SetNextProtos(openshifttls.HTTP2NextProtos...)
 func SetNextProtos(protos ...string) func(*tls.Config) {
 	var p []string
-	if len(protos) > 0 {
-		p = make([]string, len(protos))
-		copy(p, protos)
+	for _, proto := range protos {
+		if proto != "" {
+			p = append(p, proto)
+		}
 	}
 	return func(c *tls.Config) {
 		c.NextProtos = p
 	}
-}
-
-// WithHTTP2 returns a TLS configuration function that configures ALPN
-// protocol negotiation based on whether HTTP/2 should be enabled.
-//
-// When enabled is true, both "h2" and "http/1.1" are advertised.
-// When enabled is false, only "http/1.1" is advertised as a mitigation
-// for HTTP/2 Rapid Reset vulnerabilities (CVE-2023-44487, CVE-2023-39325).
-//
-// The returned function is intended to be used with controller-runtime's TLSOpts.
-//
-// Example:
-//
-//	tlsConfig, _ := openshifttls.NewTLSConfigFromProfile(profile)
-//	tlsOpts := []func(*tls.Config){tlsConfig, openshifttls.WithHTTP2(false)}
-func WithHTTP2(enabled bool) func(*tls.Config) {
-	if enabled {
-		return SetNextProtos(HTTP2NextProtos...)
-	}
-	return SetNextProtos(HTTP1NextProtos...)
 }
 
 // cipherCode returns the TLS cipher code for an OpenSSL or IANA cipher name.
