@@ -18,7 +18,7 @@
 #
 # Go.
 #
-GO_DIRECTIVE_VERSION ?= 1.25.0
+GO_DIRECTIVE_VERSION ?= 1.26.0
 
 # Active module mode, as we use go modules to manage dependencies
 export GO111MODULE=on
@@ -26,7 +26,7 @@ export GO111MODULE=on
 #
 # Kubebuilder.
 #
-export KUBEBUILDER_ENVTEST_KUBERNETES_VERSION ?= 1.34.1
+export KUBEBUILDER_ENVTEST_KUBERNETES_VERSION ?= 1.36.2
 export KUBEBUILDER_CONTROLPLANE_START_TIMEOUT ?= 60s
 export KUBEBUILDER_CONTROLPLANE_STOP_TIMEOUT ?= 60s
 
