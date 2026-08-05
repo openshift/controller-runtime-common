@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	configv1 "github.com/openshift/api/config/v1"
+	libgocrypto "github.com/openshift/library-go/pkg/crypto"
 )
 
 var _ = Describe("GetTLSProfileSpec", func() {
@@ -377,6 +378,100 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 			Expect(tlsConf.MinVersion).To(Equal(uint16(tls.VersionTLS13)))
 			// Modern profile uses TLS 1.3, so CipherSuites should NOT be set
 			Expect(tlsConf.CipherSuites).To(BeNil())
+		})
+	})
+
+	Context("when profile contains Groups", func() {
+		It("should set CurvePreferences for supported groups", func() {
+			profile := configv1.TLSProfileSpec{
+				MinTLSVersion: configv1.VersionTLS12,
+				Groups: []configv1.TLSGroup{
+					configv1.TLSGroupX25519,
+					configv1.TLSGroupSecP256r1,
+				},
+			}
+
+			tlsConfigFn, unsupported := NewTLSConfigFromProfile(profile)
+			Expect(unsupported).To(BeEmpty())
+
+			tlsConf := &tls.Config{}
+			tlsConfigFn(tlsConf)
+
+			Expect(tlsConf.CurvePreferences).To(Equal([]tls.CurveID{tls.X25519, tls.CurveP256}))
+		})
+	})
+
+	Context("when profile contains unsupported Groups", func() {
+		It("should return unsupported groups and set only supported curves", func() {
+			profile := configv1.TLSProfileSpec{
+				MinTLSVersion: configv1.VersionTLS12,
+				Groups: []configv1.TLSGroup{
+					configv1.TLSGroupX25519,
+					configv1.TLSGroup("unsupported_group"),
+				},
+			}
+
+			tlsConfigFn, unsupported := NewTLSConfigFromProfile(profile)
+			Expect(unsupported).To(ConsistOf("unsupported_group"))
+
+			tlsConf := &tls.Config{}
+			tlsConfigFn(tlsConf)
+
+			Expect(tlsConf.CurvePreferences).To(HaveLen(1))
+			Expect(tlsConf.CurvePreferences).To(ContainElement(tls.X25519))
+		})
+	})
+
+	Context("when profile has empty Groups", func() {
+		It("should not set CurvePreferences", func() {
+			profile := configv1.TLSProfileSpec{
+				MinTLSVersion: configv1.VersionTLS12,
+				Groups:        []configv1.TLSGroup{},
+			}
+
+			tlsConfigFn, unsupported := NewTLSConfigFromProfile(profile)
+			Expect(unsupported).To(BeEmpty())
+
+			tlsConf := &tls.Config{}
+			tlsConfigFn(tlsConf)
+
+			Expect(tlsConf.CurvePreferences).To(BeNil())
+		})
+	})
+
+	Context("when using Intermediate profile with Groups", func() {
+		It("should set CurvePreferences from the profile", func() {
+			profile := *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
+
+			tlsConfigFn, _ := NewTLSConfigFromProfile(profile)
+
+			tlsConf := &tls.Config{}
+			tlsConfigFn(tlsConf)
+
+			expectedCurves, _ := libgocrypto.TLSGroupsToCurveIDs(profile.Groups)
+			if len(expectedCurves) > 0 {
+				Expect(tlsConf.CurvePreferences).To(Equal(expectedCurves))
+			} else {
+				Expect(tlsConf.CurvePreferences).To(BeNil())
+			}
+		})
+	})
+
+	Context("when using Modern profile with Groups", func() {
+		It("should set CurvePreferences from the profile", func() {
+			profile := *configv1.TLSProfiles[configv1.TLSProfileModernType]
+
+			tlsConfigFn, _ := NewTLSConfigFromProfile(profile)
+
+			tlsConf := &tls.Config{}
+			tlsConfigFn(tlsConf)
+
+			expectedCurves, _ := libgocrypto.TLSGroupsToCurveIDs(profile.Groups)
+			if len(expectedCurves) > 0 {
+				Expect(tlsConf.CurvePreferences).To(Equal(expectedCurves))
+			} else {
+				Expect(tlsConf.CurvePreferences).To(BeNil())
+			}
 		})
 	})
 })
