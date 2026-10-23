@@ -279,6 +279,12 @@ var _ = Describe("ALPN protocol variables", func() {
 	})
 })
 
+func mustTLSConfig(profile configv1.TLSProfileSpec) (func(*tls.Config), []string) {
+	tlsConfigFn, unsupported, err := NewTLSConfigFromProfile(profile)
+	Expect(err).NotTo(HaveOccurred())
+	return tlsConfigFn, unsupported
+}
+
 var _ = Describe("NewTLSConfigFromProfile", func() {
 	It("should return an error for an invalid minimum TLS version", func() {
 		profile := configv1.TLSProfileSpec{MinTLSVersion: "VersionTLS99"}
@@ -482,9 +488,3 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 		})
 	})
 })
-
-func mustTLSConfig(profile configv1.TLSProfileSpec) (func(*tls.Config), []string) {
-	tlsConfigFn, unsupported, err := NewTLSConfigFromProfile(profile)
-	Expect(err).NotTo(HaveOccurred())
-	return tlsConfigFn, unsupported
-}
