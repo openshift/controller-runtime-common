@@ -245,7 +245,7 @@ var _ = Describe("SetNextProtos", func() {
 
 	It("should compose with NewTLSConfigFromProfile", func() {
 		profile := *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
-		tlsConfigFn, _ := NewTLSConfigFromProfile(profile)
+		tlsConfigFn, _ := mustTLSConfig(profile)
 
 		c := &tls.Config{}
 		tlsConfigFn(c)
@@ -279,7 +279,20 @@ var _ = Describe("ALPN protocol variables", func() {
 	})
 })
 
+func mustTLSConfig(profile configv1.TLSProfileSpec) (func(*tls.Config), []string) {
+	tlsConfigFn, unsupported, err := NewTLSConfigFromProfile(profile)
+	Expect(err).NotTo(HaveOccurred())
+	return tlsConfigFn, unsupported
+}
+
 var _ = Describe("NewTLSConfigFromProfile", func() {
+	It("should return an error for an invalid minimum TLS version", func() {
+		profile := configv1.TLSProfileSpec{MinTLSVersion: "VersionTLS99"}
+
+		_, _, err := NewTLSConfigFromProfile(profile)
+		Expect(err).To(HaveOccurred())
+	})
+
 	Context("when MinTLSVersion is TLS 1.2", func() {
 		It("should set MinVersion and CipherSuites", func() {
 			profile := configv1.TLSProfileSpec{
@@ -290,7 +303,7 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 				},
 			}
 
-			tlsConfigFn, unsupported := NewTLSConfigFromProfile(profile)
+			tlsConfigFn, unsupported := mustTLSConfig(profile)
 			Expect(unsupported).To(BeEmpty())
 
 			tlsConf := &tls.Config{}
@@ -313,7 +326,7 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 				},
 			}
 
-			tlsConfigFn, unsupported := NewTLSConfigFromProfile(profile)
+			tlsConfigFn, unsupported := mustTLSConfig(profile)
 			Expect(unsupported).To(BeEmpty())
 
 			tlsConf := &tls.Config{}
@@ -336,7 +349,7 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 				},
 			}
 
-			tlsConfigFn, unsupported := NewTLSConfigFromProfile(profile)
+			tlsConfigFn, unsupported := mustTLSConfig(profile)
 			Expect(unsupported).To(ConsistOf("DHE-RSA-AES128-GCM-SHA256", "INVALID-CIPHER"))
 
 			tlsConf := &tls.Config{}
@@ -352,7 +365,7 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 		It("should configure TLS correctly", func() {
 			profile := *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
 
-			tlsConfigFn, unsupported := NewTLSConfigFromProfile(profile)
+			tlsConfigFn, unsupported := mustTLSConfig(profile)
 
 			tlsConf := &tls.Config{}
 			tlsConfigFn(tlsConf)
@@ -370,7 +383,7 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 		It("should configure TLS correctly with TLS 1.3", func() {
 			profile := *configv1.TLSProfiles[configv1.TLSProfileModernType]
 
-			tlsConfigFn, _ := NewTLSConfigFromProfile(profile)
+			tlsConfigFn, _ := mustTLSConfig(profile)
 
 			tlsConf := &tls.Config{}
 			tlsConfigFn(tlsConf)
@@ -391,7 +404,7 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 				},
 			}
 
-			tlsConfigFn, unsupported := NewTLSConfigFromProfile(profile)
+			tlsConfigFn, unsupported := mustTLSConfig(profile)
 			Expect(unsupported).To(BeEmpty())
 
 			tlsConf := &tls.Config{}
@@ -411,7 +424,7 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 				},
 			}
 
-			tlsConfigFn, unsupported := NewTLSConfigFromProfile(profile)
+			tlsConfigFn, unsupported := mustTLSConfig(profile)
 			Expect(unsupported).To(ConsistOf("unsupported_group"))
 
 			tlsConf := &tls.Config{}
@@ -429,7 +442,7 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 				Groups:        []configv1.TLSGroup{},
 			}
 
-			tlsConfigFn, unsupported := NewTLSConfigFromProfile(profile)
+			tlsConfigFn, unsupported := mustTLSConfig(profile)
 			Expect(unsupported).To(BeEmpty())
 
 			tlsConf := &tls.Config{}
@@ -443,7 +456,7 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 		It("should set CurvePreferences from the profile", func() {
 			profile := *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
 
-			tlsConfigFn, _ := NewTLSConfigFromProfile(profile)
+			tlsConfigFn, _ := mustTLSConfig(profile)
 
 			tlsConf := &tls.Config{}
 			tlsConfigFn(tlsConf)
@@ -461,7 +474,7 @@ var _ = Describe("NewTLSConfigFromProfile", func() {
 		It("should set CurvePreferences from the profile", func() {
 			profile := *configv1.TLSProfiles[configv1.TLSProfileModernType]
 
-			tlsConfigFn, _ := NewTLSConfigFromProfile(profile)
+			tlsConfigFn, _ := mustTLSConfig(profile)
 
 			tlsConf := &tls.Config{}
 			tlsConfigFn(tlsConf)
