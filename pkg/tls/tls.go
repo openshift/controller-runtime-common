@@ -22,10 +22,16 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"strings"
 
 	configv1 "github.com/openshift/api/config/v1"
 	libgocrypto "github.com/openshift/library-go/pkg/crypto"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -55,16 +61,19 @@ var (
 
 // FetchAPIServerTLSProfile fetches the TLS profile spec configured in APIServer.
 // If no profile is configured, the default profile is returned.
+// The profile and the adherence policy are fetched in separate requests, so
+// callers needing a consistent view of both should use ResolveTLSConfig, which
+// reads them from a single APIServer resource version.
 func FetchAPIServerTLSProfile(ctx context.Context, k8sClient client.Client) (configv1.TLSProfileSpec, error) {
-	apiServer := &configv1.APIServer{}
-	key := client.ObjectKey{Name: APIServerName}
-
-	if err := k8sClient.Get(ctx, key, apiServer); err != nil {
+	apiServer, err := fetchAPIServer(ctx, k8sClient)
+	if err != nil {
+		key := client.ObjectKey{Name: APIServerName}
 		return configv1.TLSProfileSpec{}, fmt.Errorf("failed to get APIServer %q: %w", key.String(), err)
 	}
 
 	profile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
 	if err != nil {
+		key := client.ObjectKey{Name: APIServerName}
 		return configv1.TLSProfileSpec{}, fmt.Errorf("failed to get TLS profile from APIServer %q: %w", key.String(), err)
 	}
 
@@ -73,15 +82,26 @@ func FetchAPIServerTLSProfile(ctx context.Context, k8sClient client.Client) (con
 
 // FetchAPIServerTLSAdherencePolicy fetches the TLS adherence policy configured in APIServer.
 // If no policy is configured, the default policy is returned.
+// Like FetchAPIServerTLSProfile, this is a separate read; use ResolveTLSConfig
+// for a single consistent read of the profile and the policy.
 func FetchAPIServerTLSAdherencePolicy(ctx context.Context, k8sClient client.Client) (configv1.TLSAdherencePolicy, error) {
-	apiServer := &configv1.APIServer{}
-	key := client.ObjectKey{Name: APIServerName}
-
-	if err := k8sClient.Get(ctx, key, apiServer); err != nil {
+	apiServer, err := fetchAPIServer(ctx, k8sClient)
+	if err != nil {
+		key := client.ObjectKey{Name: APIServerName}
 		return configv1.TLSAdherencePolicyNoOpinion, fmt.Errorf("failed to get APIServer %q: %w", key.String(), err)
 	}
 
 	return apiServer.Spec.TLSAdherence, nil
+}
+
+func fetchAPIServer(ctx context.Context, k8sClient client.Client) (*configv1.APIServer, error) {
+	apiServer := &configv1.APIServer{}
+
+	if err := k8sClient.Get(ctx, client.ObjectKey{Name: APIServerName}, apiServer); err != nil {
+		return nil, err
+	}
+
+	return apiServer, nil
 }
 
 // GetTLSProfileSpec returns TLSProfileSpec for the given profile.
@@ -116,6 +136,172 @@ func GetTLSProfileSpec(profile *configv1.TLSSecurityProfile) (configv1.TLSProfil
 	return profile.Custom.TLSProfileSpec, nil
 }
 
+// ConfigResult holds the results of ResolveTLSConfig.
+type ConfigResult struct {
+	// TLSConfig is a function that configures a tls.Config based on the resolved profile.
+	TLSConfig func(*tls.Config)
+
+	// ProfileSpec is the profile specification observed in APIServer. It remains
+	// unchanged when TLSConfig uses the default because the observed profile is
+	// also used to initialize SecurityProfileWatcher.
+	ProfileSpec configv1.TLSProfileSpec
+
+	// AdherencePolicy is the resolved TLS adherence policy.
+	AdherencePolicy configv1.TLSAdherencePolicy
+
+	// APIServerAvailable reports whether the APIServer API is available for a
+	// SecurityProfileWatcher. It is false when the API is absent, and true when
+	// the resource was read, is temporarily absent, or a transient read error occurred.
+	APIServerAvailable bool
+}
+
+// ResolveTLSConfig resolves TLS configuration for an operator.
+// It fetches the cluster TLS profile and adherence policy, applies the appropriate
+// configuration, and returns a ConfigResult that can be used with the SecurityProfileWatcher.
+//
+// If the OpenShift API is absent or temporarily unavailable, this function falls back to
+// default configurations. Permission and unexpected API errors are returned to the caller.
+func ResolveTLSConfig(ctx context.Context, restConfig *rest.Config) (*ConfigResult, error) {
+	// The default controller-runtime scheme does not include OpenShift API types.
+	scheme := runtime.NewScheme()
+	if err := configv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add OpenShift config API to scheme: %w", err)
+	}
+
+	kubeClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
+	}
+
+	return resolveTLSConfig(ctx, kubeClient)
+}
+
+func resolveTLSConfig(ctx context.Context, kubeClient client.Client) (*ConfigResult, error) {
+	logger := log.FromContext(ctx)
+
+	defaultProfile := *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
+	profileSpec := defaultProfile
+
+	// Read the APIServer resource once so the profile and adherence policy come from
+	// the same resource version.
+	adherencePolicy := configv1.TLSAdherencePolicyNoOpinion
+	apiServerAvailable := true
+	var profileErr error
+	apiServer, fetchErr := fetchAPIServer(ctx, kubeClient)
+	if fetchErr != nil {
+		shouldFallback, available := classifyAPIServerFetchError(fetchErr)
+		if !shouldFallback {
+			key := client.ObjectKey{Name: APIServerName}
+			return nil, fmt.Errorf("failed to get APIServer %q: %w", key.String(), fetchErr)
+		}
+
+		apiServerAvailable = available
+		logger.Info("APIServer TLS configuration unavailable, using default TLS settings", "error", fetchErr)
+	} else {
+		adherencePolicy = apiServer.Spec.TLSAdherence
+		fetchedProfile, err := GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
+		if err != nil {
+			profileErr = err
+			logger.Info("APIServer TLS profile is invalid, using the default profile", "error", err)
+		} else {
+			profileSpec = fetchedProfile
+		}
+	}
+
+	// NoOpinion and LegacyAdheringComponentsOnly preserve the legacy behavior of
+	// using the component default. Unknown values honor the cluster profile for
+	// forward-compatible, more secure behavior, matching library-go's
+	// ShouldHonorClusterTLSProfile (library-go/pkg/crypto/tls_adherence.go).
+	profileToApply := defaultProfile
+	strictAdherence := adherencePolicy != configv1.TLSAdherencePolicyNoOpinion &&
+		adherencePolicy != configv1.TLSAdherencePolicyLegacyAdheringComponentsOnly
+	if strictAdherence {
+		// The cluster profile is authoritative when strict adherence is requested,
+		// so an invalid observed profile must not silently downgrade to the default.
+		if profileErr != nil {
+			return nil, fmt.Errorf("APIServer TLS profile is invalid under strict adherence: %w", profileErr)
+		}
+		profileToApply = profileSpec
+		minVersion, err := libgocrypto.TLSVersion(string(profileToApply.MinTLSVersion))
+		if err != nil {
+			return nil, fmt.Errorf("APIServer TLS profile has an invalid minimum TLS version %q: %w", profileToApply.MinTLSVersion, err)
+		}
+
+		if minVersion < tls.VersionTLS13 {
+			if len(profileToApply.Ciphers) == 0 {
+				return nil, fmt.Errorf("APIServer TLS profile with minimum version below TLS 1.3 has no cipher suites")
+			}
+
+			cipherSuites, unsupportedCiphers := cipherCodes(profileToApply.Ciphers)
+			if len(usableCipherSuites(cipherSuites)) == 0 {
+				return nil, fmt.Errorf("APIServer TLS profile has no usable cipher suites for TLS <= 1.2: all %d ciphers are TLS 1.3-only or unsupported by Go, unsupported names: %v", len(profileToApply.Ciphers), unsupportedCiphers)
+			}
+		}
+	}
+
+	tlsConfigFn, unsupportedCiphers := NewTLSConfigFromProfile(profileToApply)
+	if len(unsupportedCiphers) > 0 {
+		logger.Info("TLS profile contains unsupported ciphers that will be ignored", "count", len(unsupportedCiphers))
+	}
+
+	return &ConfigResult{
+		TLSConfig:          tlsConfigFn,
+		ProfileSpec:        profileSpec,
+		AdherencePolicy:    adherencePolicy,
+		APIServerAvailable: apiServerAvailable,
+	}, nil
+}
+
+// usableCipherSuites filters mapped cipher suite IDs down to those a Go client
+// or server can actually negotiate below TLS 1.3. TLS 1.3 suite IDs are
+// excluded because Go never negotiates them for TLS 1.2 and earlier handshakes
+// (see https://github.com/golang/go/issues/29349), IDs unknown to the
+// running Go implementation are excluded as well, and insecure suites are
+// Insecure suites are admitted when Go implements them, except for RC4,
+// which RFC 7465 prohibits.
+func usableCipherSuites(mapped []uint16) []uint16 {
+	implemented := make(map[uint16]struct{})
+	for _, suite := range tls.CipherSuites() {
+		implemented[suite.ID] = struct{}{}
+	}
+	for _, suite := range tls.InsecureCipherSuites() {
+		if !strings.Contains(suite.Name, "RC4") {
+			implemented[suite.ID] = struct{}{}
+		}
+	}
+
+	var usable []uint16
+	for _, id := range mapped {
+		if id >= 0x1300 && id <= 0x13ff {
+			continue
+		}
+		if _, ok := implemented[id]; !ok {
+			continue
+		}
+		usable = append(usable, id)
+	}
+	return usable
+}
+
+func classifyAPIServerFetchError(err error) (shouldFallback, apiServerAvailable bool) {
+	if meta.IsNoMatchError(err) {
+		return true, false
+	}
+	if apierrors.IsNotFound(err) {
+		return true, true
+	}
+
+	if apierrors.IsServiceUnavailable(err) ||
+		apierrors.IsTimeout(err) ||
+		apierrors.IsServerTimeout(err) ||
+		apierrors.IsTooManyRequests(err) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return true, true
+	}
+
+	return false, false
+}
+
 // NewTLSConfigFromProfile returns a function that configures a tls.Config based on the provided TLSProfileSpec,
 // along with any cipher names from the profile that are not supported by the library-go crypto package.
 // It returns an error when the minimum TLS version is invalid.
@@ -135,6 +321,31 @@ func NewTLSConfigFromProfile(profile configv1.TLSProfileSpec) (tlsConfig func(*t
 	unsupported = unsupportedCiphers
 	for _, g := range unsupportedGroups {
 		unsupported = append(unsupported, string(g))
+	}
+
+	if minVersion != tls.VersionTLS13 {
+		// Only suites the running Go implementation can negotiate below
+		// TLS 1.3 are applied, so a mixed list keeps its usable subset and
+		// unusable entries (RC4, TLS 1.3-only, unimplemented) are dropped.
+		// Names whose mapped IDs are dropped here are reported alongside the
+		// unmappable names so callers can log the full set.
+		usable := usableCipherSuites(cipherSuites)
+		if len(usable) != len(cipherSuites) {
+			usableSet := make(map[uint16]struct{}, len(usable))
+			for _, id := range usable {
+				usableSet[id] = struct{}{}
+			}
+			for _, cipher := range profile.Ciphers {
+				code := cipherCode(cipher)
+				if code == 0 {
+					continue // unmappable names are already reported above
+				}
+				if _, ok := usableSet[code]; !ok {
+					unsupported = append(unsupported, cipher)
+				}
+			}
+		}
+		cipherSuites = usable
 	}
 
 	return func(tlsConf *tls.Config) {
@@ -181,23 +392,26 @@ func SetNextProtos(protos ...string) func(*tls.Config) {
 }
 
 // cipherCode returns the TLS cipher code for an OpenSSL or IANA cipher name.
-// Returns 0 if the cipher is not supported.
+// Returns 0 if the cipher is not supported. Ciphers no OpenShift profile can
+// name (RC4 suites, per RFC 7465) still map to their codes here; they are
+// filtered out later by usableCipherSuites and reported as unsupported.
 func cipherCode(cipher string) uint16 {
+	var code uint16
 	// First try as IANA name directly.
-	if code, err := libgocrypto.CipherSuite(cipher); err == nil {
-		return code
-	}
-
-	// Try converting from OpenSSL name to IANA name.
-	ianaCiphers := libgocrypto.OpenSSLToIANACipherSuites([]string{cipher})
-	if len(ianaCiphers) == 1 {
-		if code, err := libgocrypto.CipherSuite(ianaCiphers[0]); err == nil {
-			return code
+	if c, err := libgocrypto.CipherSuite(cipher); err == nil {
+		code = c
+	} else {
+		// Try converting from OpenSSL name to IANA name.
+		ianaCiphers := libgocrypto.OpenSSLToIANACipherSuites([]string{cipher})
+		if len(ianaCiphers) == 1 {
+			if c, err := libgocrypto.CipherSuite(ianaCiphers[0]); err == nil {
+				code = c
+			}
 		}
 	}
 
 	// Return 0 if the cipher is not supported.
-	return 0
+	return code
 }
 
 // cipherCodes converts a list of cipher names (OpenSSL or IANA format) to their uint16 codes.
