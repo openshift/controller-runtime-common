@@ -130,7 +130,15 @@ func NewTLSConfigFromProfile(profile configv1.TLSProfileSpec) (tlsConfig func(*t
 		return nil, nil, fmt.Errorf("invalid minimum TLS version %q: %w", profile.MinTLSVersion, err)
 	}
 	cipherSuites, unsupportedCiphers := cipherCodes(profile.Ciphers)
-	curvePrefs, unsupportedGroups := libgocrypto.TLSGroupsToCurveIDs(profile.Groups)
+	var curvePrefs []tls.CurveID
+	var unsupportedGroups []configv1.TLSGroup
+	if libgocrypto.IsFIPSEnabled() {
+		_, unsupportedGroups = libgocrypto.TLSGroupsToCurveIDs(profile.Groups)
+		profile.Groups = libgocrypto.FIPSApprovedTLSGroups(profile.Groups)
+		curvePrefs, _ = libgocrypto.TLSGroupsToCurveIDs(profile.Groups)
+	} else {
+		curvePrefs, unsupportedGroups = libgocrypto.TLSGroupsToCurveIDs(profile.Groups)
+	}
 
 	unsupported = unsupportedCiphers
 	for _, g := range unsupportedGroups {
